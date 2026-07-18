@@ -459,7 +459,9 @@ class v720_sta(log):
         # so its existence is still discoverable without flooding.
         if not self._pcm_seen:
             self._pcm_seen = True
-            self.info('PCM audio stream (cmd 6) present; consuming silently (further PCM logs suppressed)')
+            # WARN so it's visible at the default production level: one line per
+            # session (i.e. ~once per camera (re)connection), not a flood.
+            self.warn('PCM audio stream (cmd 6) present; consuming silently (further PCM logs suppressed)')
 
     def __on_mjpg_rcv_hnd(self, conn: netsrv_udp, payload: bytes):
         pkg = prot_udp.resp(payload)
