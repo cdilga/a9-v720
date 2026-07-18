@@ -1,0 +1,16 @@
+.git
+.github
+.vscode
+docs
+img
+orig-app
+a9_old.py
+fake_server.md
+readme.md
+**/__pycache__/
+*.avi
+*.log
+*.wav
+*.mjpg
+*.pcap
+nohup.out
