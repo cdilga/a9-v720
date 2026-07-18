@@ -96,6 +96,7 @@ class v720_sta(log):
             f'{cmd_udp.P2P_UDP_CMD_HEARTBEAT}': self.__heartbeat_hnd,
             f'{cmd_udp.P2P_UDP_CMD_G711}': self.__on_audio_rcv_hnd,
             f'{cmd_udp.P2P_UDP_CMD_JPEG}': self.__on_mjpg_rcv_hnd,
+            f'{cmd_udp.P2P_UDP_CMD_PCM}': self.__on_pcm_rcv_hnd,
         }
 
         self._json_hnd_lst = {
@@ -132,6 +133,7 @@ class v720_sta(log):
         self._uid = None
         self._udp_port = random.randint(32768,65534)
         self._data_ch_probed = False
+        self._pcm_seen = False
 
         self._retrans_tmr = None
         self._udp_mtx = threading.Lock()
@@ -430,7 +432,12 @@ class v720_sta(log):
             pkg.payload = frm_lst
 
         self.dbg('Send empty P2P_UDP_CMD_RETRANSMISSION_CONFIRM')
-        self._udp.send(pkg.req())
+        _udp = self._udp
+        if _udp is not None:
+            try:
+                _udp.send(pkg.req())
+            except OSError:
+                pass
 
     def __on_audio_rcv_hnd(self, conn: netsrv_udp, payload: bytes):
         pkg = prot_udp.resp(payload)
@@ -442,6 +449,17 @@ class v720_sta(log):
             with self._cb_mtx:
                 for cb in self._aframe_cb:
                     cb(self, pkg.payload[:-5])
+
+    def __on_pcm_rcv_hnd(self, conn: netsrv_udp, payload: bytes):
+        # PCM mic audio (cmd 6). Newer firmware (e.g. 202312111512) interleaves a
+        # PCM audio stream with the JPEG frames. Upstream has no handler for it, so
+        # every PCM packet was logged as 'Unknown request' -- a ~1200 msg/min WARN
+        # flood (each a multi-line dump) while any client streams. We do not surface
+        # PCM audio, so we consume it silently; we log its presence ONCE per session
+        # so its existence is still discoverable without flooding.
+        if not self._pcm_seen:
+            self._pcm_seen = True
+            self.info('PCM audio stream (cmd 6) present; consuming silently (further PCM logs suppressed)')
 
     def __on_mjpg_rcv_hnd(self, conn: netsrv_udp, payload: bytes):
         pkg = prot_udp.resp(payload)
@@ -456,13 +474,18 @@ class v720_sta(log):
         elif pkg.msg_flag == cmd_udp.PROTOCOL_MSG_FLAG_END:
             self._vframe.put(pkg.payload[:-5])
             sz = int.from_bytes(pkg.payload[-4:], byteorder='little')
-            self.dbg(f'Receive H264 frame sz: {sz}')
+            self.dbg(f'Receive JPEG frame sz: {sz}')
 
+            # Assemble the frame ONCE, then fan out to every listener. Upstream
+            # drained the shared queue inside the per-callback loop, so with >1
+            # registered callback the first got the frame and the rest got an
+            # empty one (broke /snapshot whenever a live client was connected,
+            # and any multi-client use).
+            frame = bytearray()
+            while not self._vframe.empty():
+                frame.extend(self._vframe.get(False))
             with self._cb_mtx:
                 for cb in self._vframe_cb:
-                    frame = bytearray()
-                    while not self._vframe.empty():
-                        frame.extend(self._vframe.get(False))
                     cb(self, frame)
 
             if not self._first_retrans_send:
