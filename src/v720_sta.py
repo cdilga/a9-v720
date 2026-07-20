@@ -82,7 +82,7 @@ class v720_sta(log):
                                 conn.close()
                             elif int(pkg.json["code"]) == cmd_udp.CODE_D2C_PROBE_RSP:
                                 tg = pkg.json["devTarget"]
-                                for d in v720_sta.DEVS:
+                                for d in list(v720_sta.DEVS):  # snapshot: concurrent append/remove must not kill this global UDP thread
                                     resp = prot_json_udp(json={'code': cmd_udp.CODE_C2D_PROBE_REQ})
                                     conn.send(resp.req())
                                     if tg == d.id:
@@ -211,12 +211,14 @@ class v720_sta(log):
         if self._udp is not None:
             with self._udp_mtx:
                 self._udp.close()
-                del self._udp
-                self._udp = None
+                self._udp = None  # no `del` first: del+assign is 2 bytecodes, leaving an AttributeError window for __udp_hnd
 
         if self._disconnect_cb is not None and callable(self._disconnect_cb):
             self._disconnect_cb(self)
-        v720_sta.DEVS.remove(self)
+        try:
+            v720_sta.DEVS.remove(self)
+        except ValueError:
+            pass  # duplicate/already-removed connection — never throw out of the handler thread
 
     def __on_tcp_rcv(self, data: bytes):
         if data is None or len(data) == 0:
@@ -231,8 +233,10 @@ class v720_sta(log):
             self.warn(f'Unknown request {req}')
 
     def __udp_hnd(self):
-        while self._udp and not self._udp.is_closed:
-            self.__on_udp_rcv(self._udp.recv())
+        _udp = self._udp                       # capture once; self._udp can be None'd by teardown mid-loop
+        while _udp is not None and not _udp.is_closed:
+            self.__on_udp_rcv(_udp.recv())
+            _udp = self._udp
 
     def __on_udp_rcv(self, data):
         req = prot_udp.resp(data)
@@ -394,8 +398,7 @@ class v720_sta(log):
             if self._udp:
                 with self._udp_mtx:
                     self._udp.close()
-                    del self._udp
-                    self._udp = None
+                    self._udp = None  # no `del` first (AttributeError window for __udp_hnd); matches teardown path
             self._lstnr_cnt = 0
         else:
             self._lstnr_cnt -= 1

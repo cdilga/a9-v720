@@ -32,7 +32,12 @@ class v720_http(log, SimpleHTTPRequestHandler):
 
     @staticmethod
     def rm_dev(dev):
-        if dev.id in v720_http._dev_lst:
+        # Identity-guard: only remove the table entry if it STILL points at THIS
+        # instance. A stale/duplicate camera connection sharing the same uid must
+        # not evict the live device that re-registered under that uid — that key-
+        # only delete was the root cause of the 2026-07-20 /dev/list=[] split-brain
+        # (stale conn A's teardown deleted the entry now pointing at live conn B).
+        if v720_http._dev_lst.get(dev.id) is dev:
             del v720_http._dev_lst[dev.id]
 
     @staticmethod
@@ -76,8 +81,7 @@ class v720_http(log, SimpleHTTPRequestHandler):
         self.send_header('Connection', 'close')
         self.end_headers()
         _devs = []
-        for _id in v720_http._dev_lst.keys():
-            _dev = v720_http._dev_lst[_id]
+        for _id, _dev in list(v720_http._dev_lst.items()):  # items() snapshot: no KeyError if key deleted mid-iteration
             _devs.append({
                 'host': _dev.host,
                 'port': _dev.port,
