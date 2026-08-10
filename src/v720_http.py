@@ -7,6 +7,7 @@ import json
 
 from queue import Queue, Empty
 import socket
+from urllib.parse import urlparse, parse_qs
 from log import log
 
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -62,6 +63,7 @@ class v720_http(log, SimpleHTTPRequestHandler):
         cls._dev_hnds["video"] = ret.__video_hnd
         cls._dev_hnds["audio"] = ret.__audio_hnd
         cls._dev_hnds["snapshot"] = ret.__snapshot_hnd
+        cls._dev_hnds["ir"] = ret.__ir_hnd
         return ret
 
     def __init__(self, request, client_address, server) -> None:
@@ -204,13 +206,40 @@ class v720_http(log, SimpleHTTPRequestHandler):
             dev.unset_vframe_cb(_on_video_frame)
             dev.cap_stop()
 
+    def __ir_hnd(self, dev):
+        # GET /dev/<uid>/ir            -> current colour mode
+        # GET /dev/<uid>/ir?on=0       -> colour
+        # GET /dev/<uid>/ir?on=1       -> black-&-white
+        # GET (not POST) to match the rest of this server's control surface,
+        # where /live and /snapshot likewise drive the camera from a GET.
+        val = (parse_qs(urlparse(self.path).query).get('on') or [None])[0]
+        if val is not None:
+            if val not in ('0', '1'):
+                self.send_error(400, 'ir: "on" must be 0 (colour) or 1 (black-&-white)')
+                return
+            self.warn(f'IrLed={val} request @ {dev.id} ({self.client_address[0]})')
+            dev.ir_led(val == '1')
+
+        # IrLed is null until something sets it: the camera keeps its own
+        # persisted value and only reports it in the base-info blob at
+        # registration, so the server cannot claim to know it before then.
+        body = json.dumps({'uid': dev.id, 'IrLed': dev.ir_led_state}).encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-type', 'application/json')
+        self.send_header('Content-length', len(body))
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         if self.path.startswith('/dev/list'):
             self.__dev_list()
         elif not self.path.startswith('/dev') or self.path.startswith('/app'):
             SimpleHTTPRequestHandler.do_GET(self)
         else:
-            _path = self.path[1:].split('/')
+            # Strip the query string before routing -- /dev/<uid>/ir takes an
+            # ?on= argument, and the raw split would yield the command 'ir?on=0'.
+            _path = urlparse(self.path).path[1:].split('/')
             if len(_path) == 3 and \
                     _path[0] == 'dev' and \
                     _path[1] in v720_http._dev_lst:
@@ -219,6 +248,11 @@ class v720_http(log, SimpleHTTPRequestHandler):
                 if _cmd in self._dev_hnds:
                     _dev = v720_http._dev_lst[_path[1]]
                     self._dev_hnds[_cmd](_dev)
+                else:
+                    # Without this an unknown per-device command sent no response
+                    # at all and the client hung until it timed out.
+                    self.info(f'GET unknown device command: {self.path}')
+                    self.send_error(404, 'Not found')
             else:
                 self.info(f'GET unknown path: {self.path}')
                 self.send_error(404, 'Not found')

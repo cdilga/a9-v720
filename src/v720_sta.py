@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 import random
 import threading
 from datetime import datetime
@@ -20,7 +21,21 @@ class v720_sta(log):
     CLI_TG = '00112233445566778899aabbccddeeff'
     CLI_TKN = 'deadc0de'
     DEVS = []
-    
+
+    # Colour vs black-&-white (command 202, 'IrLed').
+    #
+    # On this hardware 202 does NOT drive an illuminator -- the IR LED footprint
+    # is unpopulated on most boards (only Q1 + R1 and the IR+/- header are
+    # fitted), so the command's whole observable effect is switching the ISP to
+    # monochrome: the encoder then emits JPEGs whose chroma planes are a flat
+    # 128. The camera PERSISTS that state, so a server that never sends 202
+    # streams grey forever with no way to tell why.
+    #
+    # V720_IR_LED: '0' -> force colour, '1' -> force b&w, unset -> send nothing
+    # (upstream behaviour). Re-applied on every (re)registration, because the
+    # camera drops and re-registers regularly and a one-shot would not stick.
+    IR_LED = os.environ.get('V720_IR_LED', '').strip()
+
     _is_running = True
 
     @staticmethod
@@ -134,6 +149,7 @@ class v720_sta(log):
         self._udp_port = random.randint(32768,65534)
         self._data_ch_probed = False
         self._pcm_seen = False
+        self._ir_led = None  # last value WE sent (None = never set this session)
 
         self._retrans_tmr = None
         self._udp_mtx = threading.Lock()
@@ -356,8 +372,32 @@ class v720_sta(log):
         self._tcp.send(resp.req())
 
     def __baseinfo_hnd(self, conn: netsrv_tcp, pkg: prot_json_udp):
-        self.info(f'Found device, starting video-streaming')
+        # The blob carries the camera's persisted settings -- notably IrLed (1 =
+        # monochrome) and instLed. Log it: without this the only way to read the
+        # camera's colour mode was the MQTT control plane, which the fake server
+        # does not implement at all.
+        self.info(f'Found device, base info: {pkg.json.get("content")}')
+        if v720_sta.IR_LED in ('0', '1'):
+            self.ir_led(v720_sta.IR_LED == '1')
         self.__start_live()
+
+    @property
+    def ir_led_state(self):
+        return self._ir_led
+
+    def ir_led(self, ena: bool) -> None:
+        '''
+        Switch the camera between black-&-white (True) and colour (False).
+        :param ena: 'IR' mode -- monochrome ISP output, no actual illuminator
+        '''
+        val = 1 if ena else 0
+        resp = self.__prep_fwd({
+            'code': cmd_udp.CODE_FORWARD_DEV_IR_LED,
+            'IrLed': val
+        })
+        self.info(f'Set IrLed={val} ({"black-&-white" if ena else "colour"})')
+        self._tcp.send(resp.req())
+        self._ir_led = val
 
     def __start_live(self):
         resp = self.__prep_fwd({
