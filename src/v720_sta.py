@@ -124,6 +124,7 @@ class v720_sta(log):
 
         self._fwd_hnd_lst = {
             f'{cmd_udp.CODE_FORWARD_DEV_BASE_INFO}': self.__baseinfo_hnd,
+            f'{cmd_udp.CODE_FORWARD_DEV_IR_LED}': self.__ir_led_ack_hnd,
             f'{cmd_udp.CODE_FORWARD_OPEN_A_OPEN_V}': self.__on_open_video,
             f'{cmd_udp.CODE_FORWARD_CLOSE_A_CLOSE_V}': self.__on_close_video,
         }
@@ -375,8 +376,9 @@ class v720_sta(log):
         # The blob carries the camera's persisted settings -- notably IrLed (1 =
         # monochrome) and instLed. Log it: without this the only way to read the
         # camera's colour mode was the MQTT control plane, which the fake server
-        # does not implement at all.
-        self.info(f'Found device, base info: {pkg.json.get("content")}')
+        # does not implement at all. WARN, not INFO, because the server runs at
+        # WARN unless -v: this fires once per registration, like the PCM marker.
+        self.warn(f'Found device, base info: {pkg.json.get("content")}')
         if v720_sta.IR_LED in ('0', '1'):
             self.ir_led(v720_sta.IR_LED == '1')
         self.__start_live()
@@ -395,9 +397,17 @@ class v720_sta(log):
             'code': cmd_udp.CODE_FORWARD_DEV_IR_LED,
             'IrLed': val
         })
-        self.info(f'Set IrLed={val} ({"black-&-white" if ena else "colour"})')
+        self.warn(f'Set IrLed={val} ({"black-&-white" if ena else "colour"})')
         self._tcp.send(resp.req())
         self._ir_led = val
+
+    def __ir_led_ack_hnd(self, conn: netsrv_tcp, pkg: prot_json_udp):
+        # The camera acknowledges 202 by echoing the command back. With no
+        # handler that lands in the 'unknown FWD' path and prints a multi-line
+        # WARNING every time the colour mode is set.
+        val = pkg.json['content'].get('IrLed')
+        mode = 'colour' if val == 0 else 'black-&-white' if val == 1 else 'unknown'
+        self.warn(f'Camera acknowledged IrLed={val} ({mode})')
 
     def __start_live(self):
         resp = self.__prep_fwd({
